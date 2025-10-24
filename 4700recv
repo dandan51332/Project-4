@@ -11,6 +11,8 @@ class Receiver:
 
         self.remote_host = None
         self.remote_port = None
+        self.next_expected = 0  # Next packet we need to print
+        self.buffer = {}  
 
     def send(self, message):
         self.log("Sent message %s" % json.dumps(message))
@@ -29,9 +31,26 @@ class Receiver:
             self.log("Error:  Received response from unexpected remote; ignoring")
             return None
         else:
-            self.log("Received message %s" % data.decode("utf-8"))
-            return json.loads(data.decode("utf-8"))
-
+            data = json.loads(data.decode("utf-8"))
+            seq_num = int(data['seq'])
+            if seq_num < self.next_expected:
+                self.log("Received duplicate message with seq %s" % data['seq'])
+            else:
+                self.log("Received message %s" % data)
+                self.handle_packet(data['seq'], data)
+            return data
+    
+    def handle_packet(self, seq, data):
+        # Store the packet
+        self.buffer[seq] = data
+        
+        # Print all packets we can in order
+        while self.next_expected in self.buffer:
+            # Print out the data to stdout
+            print(self.buffer[self.next_expected]["data"], end='', flush=True)
+            del self.buffer[self.next_expected]
+            self.next_expected += 1
+    
     def log(self, message):
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
@@ -43,9 +62,6 @@ class Receiver:
                 msg = self.recv(conn)
 
                 if msg:
-                    # Print out the data to stdout
-                    print(msg["data"], end='', flush=True)
-
                     # Always send back an ack
                     self.send({ "type": "ack", "seq": msg["seq"] })
 

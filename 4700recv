@@ -11,7 +11,7 @@ class Receiver:
 
         self.remote_host = None
         self.remote_port = None
-        self.next_expected = 0  # Next packet we need to print
+        self.next_expected = 0
         self.buffer = {}  
 
     def send(self, message):

@@ -2,8 +2,8 @@
 
 import argparse, socket, time, json, select, struct, sys, math
 
+# Trying to ensure that data is less than 1500 bytes
 DATA_SIZE = 1375
-TIMEOUT = 1
 
 class Sender:
     
@@ -14,10 +14,15 @@ class Sender:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('0.0.0.0', 0))
 
-        self.window_size = 2  # Start conservative
+        self.window_size = 4
         self.consecutive_acks = 0
         self.in_flight = {}
         self.next_seq = 0
+        
+        # Adaptive timeout variables
+        self.estimated_rtt = 0.5
+        self.rttDeviation = 0.25 
+        self.timeout = 1.0 
         
         self.remote_host = None
         self.remote_port = None
@@ -44,18 +49,41 @@ class Sender:
             self.log("Received message %s" % data.decode("utf-8"))
             return json.loads(data.decode("utf-8"))
 
-    def run(self):
+    """
+    Update timeout based on measured RTT using TCP's algorithm:
+    - estimated_rtt = 0.875 * estimated_rtt + 0.125 * sample_rtt
+    - dev_rtt = 0.75 * dev_rtt + 0.25 * |sample_rtt - estimated_rtt|
+    - timeout = estimated_rtt + 4 * dev_rtt
+    Referenced from: https://www.rfc-editor.org/rfc/rfc6298.html
+    """
+    def update_timeout(self, sample_rtt):
         
+        self.estimated_rtt = 0.875 * self.estimated_rtt + 0.125 * sample_rtt
+        self.rttDeviation = 0.75 * self.rttDeviation + 0.25 * abs(sample_rtt - self.estimated_rtt)
+        self.timeout = self.estimated_rtt + 4 * self.rttDeviation
+        self.timeout = max(0.5, min(self.timeout, 5.0))
+        
+        self.log(f"Updated timeout: RTT={sample_rtt:.3f}s, estimated RTT={self.estimated_rtt:.3f}s, RTT deviation={self.rttDeviation:.3f}s, Timeout={self.timeout:.3f}s")
+
+    def run(self):
         while True:
             # Check for timeouts and retransmit
             current_time = time.time()
+            timeout_occurred = False
+            
             for seq, packet_info in list(self.in_flight.items()):
-                if current_time - packet_info['time'] > TIMEOUT:
+                if current_time - packet_info['time'] > self.timeout:
                     self.log(f"Timeout for packet {seq}, retransmitting")
                     self.send(packet_info['msg'])
                     packet_info['time'] = current_time
-                    self.window_size = max(2, self.window_size // 2)
-                    self.log(f"Decreased window to {self.window_size}")
+                    timeout_occurred = True
+            
+            # Only decrease window once per iteration if any timeouts occurred
+            if timeout_occurred:
+                old_window = self.window_size
+                self.window_size = max(2, self.window_size // 2)
+                self.consecutive_acks = 0
+                self.log(f"Decreased window from {old_window} to {self.window_size}")
 
             # Determine what sockets to monitor
             can_send = len(self.in_flight) < self.window_size
@@ -70,6 +98,10 @@ class Sender:
                     if data and data.get('type') == 'ack':
                         ack_seq = data['seq']
                         if ack_seq in self.in_flight:
+                            # Measure RTT for this packet
+                            sample_rtt = time.time() - self.in_flight[ack_seq]['time']
+                            self.update_timeout(sample_rtt)
+                            
                             self.log(f"Got ACK for packet {ack_seq}")
                             del self.in_flight[ack_seq]
                             
